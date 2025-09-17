@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pong - HTML5</title>
+  <style>
+    :root { --bg: #0f0f13; --fg: #e6e6e6; --accent: #7ccfff; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .wrap { display:flex; align-items:center; justify-content:center; height: 100%; padding: 16px; box-sizing: border-box; }
+    canvas { background: #12151c; border: 1px solid #1e2230; box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 0 100px rgba(255,255,255,.02); image-rendering: crisp-edges; image-rendering: pixelated; }
+    .hud { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); text-align:center; user-select: none; pointer-events: none; }
+    .hud small { opacity: .7; display:block; }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <div id="score">0 : 0</div>
+    <small>W/S or Arrow Keys to move • Space to pause/reset</small>
+  </div>
+  <div class="wrap">
+    <canvas id="game" width="960" height="540" aria-label="Pong game"></canvas>
+  </div>
+  <script>
+  (() => {
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+
+    const W = canvas.width, H = canvas.height;
+
+    // Game state
+    const state = {
+      running: true,
+      awaitingServe: true,
+      lastTime: performance.now(),
+      playerScore: 0,
+      aiScore: 0,
+      winningScore: 7
+    };
+
+    const PADDLE = {
+      w: 14,
+      h: 90,
+      speed: 480
+    };
+
+    const BALL = {
+      r: 8,
+      speed: 360,
+      speedMax: 820,
+      speedAccel: 1.03 // speed up per paddle hit
+    };
+
+    const net = {
+      w: 6,
+      gap: 16
+    };
+
+    const player = { x: 30, y: (H - PADDLE.h)/2, vy: 0 };
+    const ai = { x: W - 30 - PADDLE.w, y: (H - PADDLE.h)/2, vy: 0 };
+    const ball = { x: W/2, y: H/2, vx: 0, vy: 0, r: BALL.r, speed: BALL.speed };
+
+    function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+    function randSign(){ return Math.random() < 0.5 ? -1 : 1; }
+    function resetBall(toLeft=null){
+      ball.x = W/2; ball.y = H/2;
+      ball.speed = BALL.speed;
+      const angle = (Math.random()*0.6 - 0.3); // -0.3..0.3 radians ~ +-17deg
+      const dirX = toLeft === null ? randSign() : (toLeft ? -1 : 1);
+      ball.vx = Math.cos(angle) * ball.speed * dirX;
+      ball.vy = Math.sin(angle) * ball.speed;
+      state.awaitingServe = false;
+    }
+
+    // Input
+    const keys = new Set();
+    window.addEventListener('keydown', (e) => {
+      if (['ArrowUp','ArrowDown','w','W','s','S',' '].includes(e.key)) e.preventDefault();
+      keys.add(e.key);
+      if (e.key === ' ') {
+        state.running = !state.running;
+        if (state.running && state.awaitingServe) resetBall(null);
+      }
+    });
+    window.addEventListener('keyup', (e) => keys.delete(e.key));
+
+    // Touch input for mobile
+    let touchY = null;
+    canvas.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'mouse') {
+        const rect = canvas.getBoundingClientRect();
+        touchY = e.clientY - rect.top;
+      }
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (touchY != null) {
+        const rect = canvas.getBoundingClientRect();
+        touchY = e.clientY - rect.top;
+      }
+    });
+    window.addEventListener('pointerup', () => touchY = null);
+
+    function update(dt) {
+      // Player control
+      let move = 0;
+      if (keys.has('ArrowUp') || keys.has('w') || keys.has('W')) move -= 1;
+      if (keys.has('ArrowDown') || keys.has('s') || keys.has('S')) move += 1;
+      if (touchY != null) {
+        // Follow touch smoothly
+        const target = touchY - PADDLE.h/2;
+        player.y += clamp((target - player.y) * 8 * dt, -PADDLE.speed, PADDLE.speed);
+      } else {
+        player.y += move * PADDLE.speed * dt;
+      }
+      player.y = clamp(player.y, 0, H - PADDLE.h);
+
+      // AI tracks ball with reaction lag
+      const aiCenter = ai.y + PADDLE.h/2;
+      const targetY = ball.y - PADDLE.h/2;
+      const aiMax = PADDLE.speed * 0.9; // slightly slower than player
+      const followStrength = 0.12; // smoothing
+      ai.vy = clamp((targetY - ai.y) * followStrength / dt, -aiMax, aiMax);
+      ai.y = clamp(ai.y + ai.vy * dt, 0, H - PADDLE.h);
+
+      if (state.awaitingServe) return;
+
+      // Ball movement
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+
+      // Top/bottom collision
+      if (ball.y - ball.r <= 0 && ball.vy < 0) { ball.y = ball.r; ball.vy *= -1; }
+      if (ball.y + ball.r >= H && ball.vy > 0) { ball.y = H - ball.r; ball.vy *= -1; }
+
+      // Paddle collisions
+      // Player
+      if (ball.x - ball.r <= player.x + PADDLE.w &&
+          ball.x - ball.r >= player.x &&
+          ball.y >= player.y && ball.y <= player.y + PADDLE.h &&
+          ball.vx < 0) {
+        const rel = (ball.y - (player.y + PADDLE.h/2)) / (PADDLE.h/2); // -1..1
+        const angle = rel * 0.6; // max ~±34°
+        const speed = clamp(Math.hypot(ball.vx, ball.vy) * BALL.speedAccel, BALL.speed, BALL.speedMax);
+        ball.vx = Math.cos(angle) * speed;
+        ball.vy = Math.sin(angle) * speed;
+        ball.x = player.x + PADDLE.w + ball.r; // prevent sticking
+      }
+      // AI
+      if (ball.x + ball.r >= ai.x &&
+          ball.x + ball.r <= ai.x + PADDLE.w &&
+          ball.y >= ai.y && ball.y <= ai.y + PADDLE.h &&
+          ball.vx > 0) {
+        const rel = (ball.y - (ai.y + PADDLE.h/2)) / (PADDLE.h/2);
+        const angle = rel * 0.6;
+        const speed = clamp(Math.hypot(ball.vx, ball.vy) * BALL.speedAccel, BALL.speed, BALL.speedMax);
+        ball.vx = -Math.cos(angle) * speed;
+        ball.vy = Math.sin(angle) * speed;
+        ball.x = ai.x - ball.r; // prevent sticking
+      }
+
+      // Scoring
+      if (ball.x + ball.r < 0) {
+        state.aiScore++;
+        scoreEl.textContent = state.playerScore + ' : ' + state.aiScore;
+        state.awaitingServe = true;
+        if (state.aiScore >= state.winningScore) endGame(false);
+        else resetBall(false); // serve to player
+      } else if (ball.x - ball.r > W) {
+        state.playerScore++;
+        scoreEl.textContent = state.playerScore + ' : ' + state.aiScore;
+        state.awaitingServe = true;
+        if (state.playerScore >= state.winningScore) endGame(true);
+        else resetBall(true); // serve to AI
+      }
+    }
+
+    function endGame(playerWon) {
+      state.running = false;
+      state.awaitingServe = true;
+      draw(); // draw final state
+      setTimeout(() => {
+        alert((playerWon ? 'You win! ' : 'AI wins. ') + 'Press Space to play again.');
+        // reset
+        state.playerScore = 0;
+        state.aiScore = 0;
+        scoreEl.textContent = '0 : 0';
+        player.y = (H - PADDLE.h)/2;
+        ai.y = (H - PADDLE.h)/2;
+        state.running = true;
+        resetBall(null);
+      }, 50);
+    }
+
+    function drawNet() {
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      const seg = 12;
+      for (let y = 0; y < H; y += seg + net.gap) {
+        ctx.fillRect(W/2 - net.w/2, y, net.w, seg);
+      }
+    }
+
+    function draw() {
+      // Background
+      ctx.fillStyle = '#0e121a';
+      ctx.fillRect(0, 0, W, H);
+
+      // Net
+      drawNet();
+
+      // Paddles
+      ctx.fillStyle = '#e6e6e6';
+      ctx.fillRect(player.x, player.y, PADDLE.w, PADDLE.h);
+      ctx.fillRect(ai.x, ai.y, PADDLE.w, PADDLE.h);
+
+      // Ball
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Center score big
+      ctx.fillStyle = '#7ccfff';
+      ctx.font = 'bold 48px system-ui, Segoe UI, Roboto, Arial';
+      ctx.textAlign = 'center';
+      ctx.globalAlpha = 0.85;
+      ctx.fillText(state.playerScore + '    ' + state.aiScore, W/2, 70);
+      ctx.globalAlpha = 1;
+
+      // Instructions overlay when paused
+      if (!state.running) {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(0,0,W,H);
+        ctx.fillStyle = '#e6e6e6';
+        ctx.font = 'bold 36px system-ui, Segoe UI, Roboto, Arial';
+        ctx.fillText('Paused', W/2, H/2 - 20);
+        ctx.font = '20px system-ui, Segoe UI, Roboto, Arial';
+        ctx.fillText('Press Space to resume', W/2, H/2 + 18);
+      }
+    }
+
+    function loop(now) {
+      const dt = Math.min(0.033, (now - state.lastTime) / 1000); // clamp dt for stability
+      state.lastTime = now;
+
+      if (state.running) {
+        update(dt);
+      }
+
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // Kick off
+    resetBall(randSign() < 0); // random initial serve
+    requestAnimationFrame(loop);
+  })();
+  </script>
+</body>
+</html>
